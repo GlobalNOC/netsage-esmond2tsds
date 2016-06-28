@@ -1,0 +1,4 @@
+<config>
+   <tsds user="foo" password="bar" url="http://yourdomain.com/tsds/services/push.cgi" />
+   <mesh url="http://yourdomain.com/meshes/yourmesh.json" />
+</config>
