@@ -46,9 +46,12 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(755,root,root,-)
 /usr/bin/esmond2tsds
 
-%defattr(644,netsage,netsage,-)
-%config(noreplace) /etc/netsage/esmond-mesh-2-tsds/config.xml
+%defattr(644,root,root,-)
 %config(noreplace) /etc/cron.d/esmond-mesh-2-tsds.cron
+
+%defattr(640,netsage,netsage,-)
+%config(noreplace) /etc/netsage/esmond-mesh-2-tsds/config.xml
+
 
 %pre
 /usr/bin/getent passwd netsage || /usr/sbin/useradd -r -g netsage -s /sbin/nologin netsage
