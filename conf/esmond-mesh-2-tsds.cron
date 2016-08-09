@@ -1,0 +1,1 @@
+*/15 * * * * netsage /usr/bin/perl /usr/bin/esmond2tsds -c /etc/netsage/esmond-mesh-2-tsds/config.xml >/dev/null 2>&1

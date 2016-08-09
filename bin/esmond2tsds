@@ -3,10 +3,8 @@
 use strict;
 use warnings;
 
-use FindBin;
-
 # For esmond libs
-use lib "$FindBin::Bin/../perfsonar-lib";
+use lib "/usr/lib/perfsonar/lib/";
 
 use DateTime;
 use Data::Dumper;
@@ -109,6 +107,7 @@ foreach my $test (@$tests){
 
     # Each a member tests to/from each b member
     foreach my $a_member (@$a_members){
+
 	foreach my $b_member (@$b_members){
 
 	    my $ma_url;
@@ -142,8 +141,11 @@ foreach my $test (@$tests){
 		# Send data collected for this source/dest pairing over 
 		# into TSDS
 		#
-		my @combined = (@$to_tsds_forward, @$to_tsds_reverse);
-		send_to_tsds(\@combined);
+		my @combined  = (@$to_tsds_forward, @$to_tsds_reverse);
+		my $merged    = merge_owamp_results(\@combined);
+
+		send_to_tsds($merged);
+
 	    }
 	}
     }
@@ -164,43 +166,42 @@ sub get_data {
     my $end   = $NOW - ($hours_back * 3600);
     my $start = $end - 3600;
 
-    warn "Getting from $a -> $b from $url ($start -> $end)";
+    print "Getting from $a -> $b from $url ($start -> $end)\n";
 
-    my $filters = new perfSONAR_PS::Client::Esmond::ApiFilters();
-    $filters->source($a);
-    $filters->destination($b);
-    $filters->time_range(86400);
+    my @event_types;
+    if ($test_type =~ /bwctl/){
+	push(@event_types, 'throughput');
+    }
+    if ($test_type =~ /owamp/){
+	push(@event_types, 'packet-loss-rate');
+	push(@event_types, 'histogram-owdelay');
+    }
 
-    my $client = new perfSONAR_PS::Client::Esmond::ApiConnect(
-	url => $url,
-	filters => $filters
-	);
-    
-    my $metadata_results = $client->get_metadata();
-    
-    die $client->error if ($client->error); #check for errors
+    foreach my $event_type (@event_types){
 
-    foreach my $metadatum (@$metadata_results){
+	my $filters = new perfSONAR_PS::Client::Esmond::ApiFilters();
+	$filters->source($a);
+	$filters->destination($b);
+	$filters->event_type($event_type);
 
-	my @event_types;
+	my $client = new perfSONAR_PS::Client::Esmond::ApiConnect(
+	    url => $url,
+	    filters => $filters
+	    );
+	
+	my $metadata_results = $client->get_metadata();
 
-	if ($test_type =~ /bwctl/){
-	    push(@event_types, 'throughput');
-	}
-	if ($test_type =~ /owamp/){
-	    push(@event_types, 'packet-loss-rate');
-	    push(@event_types, 'histogram-owdelay');
-	}
-
-	foreach my $event_type (@event_types){
-
-	    warn "  $event_type\n";
+	die $client->error if ($client->error); #check for errors
+	
+	foreach my $metadatum (@$metadata_results){
 
 	    # get data of a particular event type
 	    my $et = $metadatum->get_event_type($event_type);
-	    next if (! $et);
 
-	    warn "Found $event_type";
+	    if (! $et){
+		warn "no event type? shouldn't be possible";
+		next;
+	    }
 
 	    $et->filters->time_start($start);
 	    $et->filters->time_end($end);
@@ -220,12 +221,12 @@ sub get_data {
 		if ($event_type eq 'packet-loss-rate'){
 		    push(@to_tsds, {
 			"meta"     => $meta,
-			"interval" => $interval,
-			"type"     => TSDS_TYPE_OWAMP,
-			"time"     => $d->ts,
-			"values"   => {
-			    "loss" => $d->val
-			}
+		     	"interval" => $interval,
+		     	"type"     => TSDS_TYPE_OWAMP,
+		     	"time"     => $d->ts,
+		     	"values"   => {
+		     	    "loss" => $d->val
+		     	}
 			 });
 		}
 
@@ -260,6 +261,11 @@ sub get_data {
 			}
 		    }
 
+		    my $avg = undef;
+		    if ($count_total > 0){
+			$avg = $sum / $count_total;
+		    }
+
 		    push(@to_tsds, {
 			"meta"     => $meta,
 			"interval" => $interval,
@@ -268,7 +274,7 @@ sub get_data {
 			"values"   => {
 			    "latency_min" => $min,
 			    "latency_max" => $max,
-			    "latency_avg" => ($sum / $count_total)
+			    "latency_avg" => $avg
 			}
 			 });
 		}
@@ -280,19 +286,62 @@ sub get_data {
     return \@to_tsds;
 }
 
+sub merge_owamp_results {
+    my $array = shift;
+
+    my @merged;
+
+    my %lookup;
+
+    foreach my $el (@$array){
+	# don't care about other types
+	if ($el->{'type'} ne TSDS_TYPE_OWAMP){
+	    push(@merged, $el);
+	    next;
+	}
+	
+	my $src = $el->{'meta'}{'source'};
+	my $dest = $el->{'meta'}{'destination'};
+
+	my $floored = int($el->{'time'} / $el->{'interval'}) * $el->{'interval'};
+
+	if (! exists $lookup{$src}{$dest}{$floored}){
+	    $lookup{$src}{$dest}{$floored} = $el;
+	}
+
+	foreach my $key (keys %{$el->{'values'}}){
+	    $lookup{$src}{$dest}{$floored}{'values'}{$key} = $el->{'values'}{$key};
+	}
+
+    }
+
+    foreach my $src (keys %lookup){
+	foreach my $dst (keys %{$lookup{$src}}){
+	    foreach my $time (keys %{$lookup{$src}{$dst}}){
+		push(@merged, $lookup{$src}{$dst}{$time});
+	    }
+	}
+    }
+
+    return \@merged;
+}
 
 sub send_to_tsds {
     my $data = shift;
 
-    my $it = natatime(50, @$data);
+    my $block_size = 50;
+    if ($block_size > scalar @$data){
+	$block_size = scalar @$data;
+    }
+
+    my $it = natatime($block_size, @$data);
 
     while (my @block = $it->()){
+
 	my $res = $client->add_data(data => encode_json(\@block));
 
 	if (! $res){
 	    die "Error: " . $client->get_error();
-	}
-	
-	warn Dumper($res);
+	}	
     }
 }
