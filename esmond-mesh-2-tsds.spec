@@ -1,6 +1,6 @@
 Summary: Esmond Mesh to TSDS Importer
 Name: esmond-mesh-2-tsds
-Version: 1.0.0
+Version: 1.0.1
 Release: 1%{?dist}
 License: Apache
 URL: https://sites.google.com/site/netsagensf/home#NetSage
@@ -30,6 +30,7 @@ NetSage project, such as working only on disjoint meshes.
 rm -rf $RPM_BUILD_ROOT
 
 %{__install} -d -m0755 %{buildroot}/etc/netsage/esmond-mesh-2-tsds/
+%{__install} -d -m0755 %{buildroot}/var/lib/netsage/esmond-mesh-2-tsds/
 %{__install} -d -m0755 %{buildroot}/usr/bin/
 %{__install} -d -p %{buildroot}/etc/cron.d/
 
@@ -52,6 +53,8 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(640,netsage,netsage,-)
 %config(noreplace) /etc/netsage/esmond-mesh-2-tsds/config.xml
 
+%defattr(755,netsage,netsage,-)
+%dir /var/lib/netsage/esmond-mesh-2-tsds/
 
 %pre
 /usr/bin/getent passwd netsage || /usr/sbin/useradd -r -g netsage -s /sbin/nologin netsage

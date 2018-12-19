@@ -17,11 +17,13 @@ use perfSONAR_PS::Client::Esmond::ApiConnect;
 
 use GRNOC::Config;
 use GRNOC::WebService::Client;
+use GRNOC::Monitoring::Service::Status qw(write_service_status);
 
 use Getopt::Long;
 
 use constant TSDS_TYPE_OWAMP => 'ps_owamp';
 use constant TSDS_TYPE_BWCTL => 'ps_bwctl';
+use constant STATUS_FILE     => '/var/lib/netsage/esmond-mesh-2-tsds/';
 
 my $config_file = "/etc/grnoc/esmond2tsds/config.xml";
 my $hours       = 1;
@@ -44,7 +46,7 @@ my $client = GRNOC::WebService::Client->new(usePost => 1,
 					    url     => $tsds_url);
 
 
-my $mesh_json = get($mesh_url) or die "Can't download mesh: $mesh_url";
+my $mesh_json = get($mesh_url) || _error("Can't download mesh: $mesh_url");
 $mesh_json    = decode_json($mesh_json);
 
 #
@@ -149,8 +151,13 @@ foreach my $test (@$tests){
 	    }
 	}
     }
-
 }
+
+write_service_status(  path => STATUS_FILE,
+		       error => 0,
+		       error_txt => "",
+		       timestamp => $NOW );
+
 
 sub get_data {
     my %args = @_;
@@ -165,6 +172,9 @@ sub get_data {
 
     my $end   = $NOW - ($hours_back * 3600);
     my $start = $end - 3600;
+
+    # HACK, THESE ARE PROBLEMATIC
+    return [] if ($url eq 'http://ps-ma.ampath.net/esmond/perfsonar/archive/');
 
     print "Getting from $a -> $b from $url ($start -> $end)\n";
 
@@ -191,7 +201,11 @@ sub get_data {
 	
 	my $metadata_results = $client->get_metadata();
 
-	die $client->error if ($client->error); #check for errors
+	# check for errors
+	if ($client->error){
+	    warn "Error contacting $url";
+	    next;
+	} 
 	
 	foreach my $metadatum (@$metadata_results){
 
@@ -208,7 +222,7 @@ sub get_data {
 
 	    my $data = $et->get_data();
 	
-	    die $et->error if ($et->error); #check for errors
+	    _error($et->error) if ($et->error); #check for errors
 	
 	    # Go through and push data into TSDS format
 	    foreach my $d (@$data){
@@ -341,7 +355,25 @@ sub send_to_tsds {
 	my $res = $client->add_data(data => encode_json(\@block));
 
 	if (! $res){
-	    die "Error: " . $client->get_error();
+	    _error("Error: " . $client->get_error());
 	}	
+	if (ref($res) ne 'HASH'){
+	    _error("Error: did not get hash response back, was " . Dumper($res));
+	}
+	if ($res->{'error'}){
+	    _error("WS Error: " . Dumper($res));
+	}
+
     }
+}
+
+sub _error {
+    my $text = shift;
+
+    write_service_status(  path => STATUS_FILE,
+			   error => 1,
+			   error_txt => $text,
+			   timestamp => $NOW  );    
+
+    die $text;
 }
