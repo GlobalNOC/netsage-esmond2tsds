@@ -25,7 +25,7 @@ use constant TSDS_TYPE_OWAMP => 'ps_owamp';
 use constant TSDS_TYPE_BWCTL => 'ps_bwctl';
 use constant STATUS_FILE     => '/var/lib/netsage/esmond-mesh-2-tsds/';
 
-my $config_file = "/etc/grnoc/esmond2tsds/config.xml";
+my $config_file = "/etc/netsage/esmond-mesh-2-tsds/config.xml";
 my $hours       = 1;
 
 my $NOW = time();
