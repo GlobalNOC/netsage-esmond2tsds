@@ -1,4 +1,16 @@
 <config>
    <tsds user="foo" password="bar" url="http://yourdomain.com/tsds/services/push.cgi" />
    <mesh url="http://yourdomain.com/meshes/yourmesh.json" />
+   <tests ma_url="http://domain/esmond/perfsonar/archive/">
+     <test type="test_type" interval="21600">
+         <pair a="source_addr" b="dest_addr"/>
+         <pair a="source_addr" b= "dest_addr"/>
+         <pair a="source_addr" b="dest_addr"/>
+     </test>
+     <test type="test_type" sample_count="600" packet_interval="0.1">
+         <pair a="source_addr" b="dest_addr"/>
+         <pair a="source_addr" b= "dest_addr"/>
+         <pair a="source_addr" b="dest_addr"/>
+     </test>
+   </tests>
 </config>

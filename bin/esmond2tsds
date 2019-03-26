@@ -25,7 +25,7 @@ use constant TSDS_TYPE_OWAMP => 'ps_owamp';
 use constant TSDS_TYPE_BWCTL => 'ps_bwctl';
 use constant STATUS_FILE     => '/var/lib/netsage/esmond-mesh-2-tsds/';
 
-my $config_file = "/etc/grnoc/esmond2tsds/config.xml";
+my $config_file = "/etc/netsage/esmond-mesh-2-tsds/config.xml";
 my $hours       = 1;
 
 my $NOW = time();
@@ -79,7 +79,7 @@ my $tests = $mesh_json->{'tests'};
 
 
 #
-# Step 2 - for each test in the mesh, grab the data in Esmond so that
+# Step 2a - for each test in the mesh, grab the data in Esmond so that
 # we can reformat and send to TSDS
 #
 foreach my $test (@$tests){
@@ -139,8 +139,8 @@ foreach my $test (@$tests){
 					       test_type  => $test_type);
 		
 		#
-		# Step 3
-		# Send data collected for this source/dest pairing over 
+		# Step 3a
+		# Send data collected for this source/dest pairing over
 		# into TSDS
 		#
 		my @combined  = (@$to_tsds_forward, @$to_tsds_reverse);
@@ -152,6 +152,66 @@ foreach my $test (@$tests){
 	}
     }
 }
+
+
+$config->{'force_array'} = 1;
+my $config_tests = $config->get('/config/tests');
+
+#
+# Step 2b - for each test in the config file, grab the data in Esmond so that
+# we can reformat and send to TSDS
+#
+
+foreach my $conf (@$config_tests){
+
+    my $tests = $conf->{'test'};
+    # find ma_url
+    my $ma_url = $conf->{'ma_url'};
+    foreach my $test (@$tests) {
+
+       my $pairs = $test->{'pair'};
+       my $test_type = $test->{'type'};
+       my $interval;
+
+       if ($test_type =~ /bwctl/){
+           $interval = $test->{'interval'};
+       } elsif ($test_type =~ /owamp/){
+           $interval = $test->{'sample_count'} * $test->{'packet_interval'};
+       }
+
+       foreach my $pair (@$pairs){
+
+           for (my $i = 0; $i < $hours; $i++){
+
+               # get forward and reverse
+               my $to_tsds_forward = get_data(from		=> $pair->{'a'},
+                                              to		=> $pair->{'b'},
+                                              ma_url		=> $ma_url,
+                                              hours_back	=> $i,
+                                              interval		=> $interval,
+                                              test_type		=> $test_type);
+
+               my $to_tsds_reverse = get_data(from		=> $pair->{'b'},
+                                              to		=> $pair->{'a'},
+                                              ma_url		=> $ma_url,
+                                              hours_back	=> $i,
+                                              interval		=> $interval,
+                                              test_type		=> $test_type);
+
+              #
+              # Step 3b
+              # Send data collected for this source/dest pairing over
+              # into TSDS
+              #
+               my @combined = (@$to_tsds_forward, @$to_tsds_reverse);
+               my $merged = merge_owamp_results(\@combined);
+
+               send_to_tsds($merged)
+           }
+       }
+    }
+}
+
 
 write_service_status(  path => STATUS_FILE,
 		       error => 0,
