@@ -14,6 +14,10 @@ use JSON::XS qw(decode_json encode_json);
 use LWP::Simple qw(get);
 
 use perfSONAR_PS::Client::Esmond::ApiConnect;
+use perfSONAR_PS::Client::PSConfig::ApiConnect;
+use perfSONAR_PS::Client::PSConfig::Archive;
+use perfSONAR_PS::Client::PSConfig::Parsers::TaskGenerator;
+use perfSONAR_PS::Utils::ISO8601 qw(duration_to_seconds);
 
 use GRNOC::Config;
 use GRNOC::WebService::Client;
@@ -23,6 +27,7 @@ use Getopt::Long;
 
 use constant TSDS_TYPE_OWAMP => 'ps_owamp';
 use constant TSDS_TYPE_BWCTL => 'ps_bwctl';
+use constant TSDS_TYPE_DISKTODISK => 'ps_disktodisk';
 use constant STATUS_FILE     => '/var/lib/netsage/esmond-mesh-2-tsds/';
 
 my $config_file = "/etc/netsage/esmond-mesh-2-tsds/config.xml";
@@ -45,123 +50,123 @@ my $client = GRNOC::WebService::Client->new(usePost => 1,
 					    passwd  => $password,
 					    url     => $tsds_url);
 
-
-my $mesh_json = get($mesh_url) || _error("Can't download mesh: $mesh_url");
-$mesh_json    = decode_json($mesh_json);
-
 #
-# Step 1 - parse out the host and test information from the 
-# test mesh json
+# Step 1 - Build pSConfig client and validate downloaded JSON
 #
-
-my @hosts;
-
-my $organizations = $mesh_json->{'organizations'};
-foreach my $org (@$organizations){
-    my $sites = $org->{'sites'};
-
-    foreach my $site (@$sites){
-	my $hosts = $site->{'hosts'};
-	
-	foreach my $host (@$hosts){
-	    # if we aren't using host specified measurement archives, use the
-	    # the default mesh archives
-	    if (! $host->{'measurement_archives'}){
-		$host->{'measurement_archives'} = $mesh_json->{'measurement_archives'};
-	    }
-
-	    push(@hosts, $host);
-	}
+my $psconfig_client = new perfSONAR_PS::Client::PSConfig::ApiConnect(url => $mesh_url);
+my $psconfig = $psconfig_client->get_config();
+if($psconfig_client->error()){
+    my $err = "Error retrieving JSON. Encountered the following error:\n\n";
+    $err .= "   " . $psconfig_client->error();
+    print $err;
+    exit 1;
+}
+my @validate_errors = $psconfig->validate();
+if(@validate_errors){
+    my $err = "pSConfig JSON is not valid. Encountered the following validation errors:\n";
+    foreach my $error(@validate_errors){
+        $err .=  "\n   Node: " . $error->path . "\n";
+        $err .=  "   Error: " . $error->message . "\n";
     }
+    print $err;
+    exit 1;
 }
 
-my $tests = $mesh_json->{'tests'};
+#
+# Step 2 - Iterate through each task in pSConfig template and 
+# get source, dest, interval and MA URL for supported tests
+#
+foreach my $task_name(@{$psconfig->task_names()}){
+	my $tg = new perfSONAR_PS::Client::PSConfig::Parsers::TaskGenerator(
+	    psconfig => $psconfig,
+	    task_name => $task_name,
+	    use_psconfig_archives => 1
+	);
+	my $task = $psconfig->task($task_name);
+    next if(!$task || $task->disabled());
+	unless($tg->start()){
+         print "Error initializing task iterator: " . $tg->error();
+         exit 1;
+    }
+	
+	#check interval based on test type
+	my $test_type = $tg->test()->type();
+	my $test_spec = $tg->test()->spec();
+	my $schedule = $tg->schedule();
+	my $interval;
+	if($test_type eq 'throughput' || $test_type eq 'disk-to-disk'){
+		unless($schedule && $schedule->repeat()){
+			warn "Invalid schedule for $task_name of type $test_type. Must have repeat.";
+			next;
+		}
+		eval{$interval = duration_to_seconds($schedule->repeat())};
+		if($@){
+			warn "Unable to convert $task_name repeat to seconds, skipping: $@";
+			next;
+		}
+	}elsif ($test_type eq 'latencybg'){
+		#get packet interval or defacult to 10 per sec (.1)
+		my $packet_interval = $test_spec->{'packet-interval'} ? $test_spec->{'packet-interval'} : 0.1;
+		#get packet count or defacult to 600
+		my $packet_count = $test_spec->{'packet-count'} ? $test_spec->{'packet-count'} : 600;
+		#finally set interval to frequency results are reported
+		$interval = $packet_interval * $packet_count;
+	}else{
+		warn "Task $task_name is unsupported type $test_type, skipping";
+		next;
+	}
+	
+	#iterate through endpoint pairs
+	my @pair;
+    while(@pair = $tg->next()){
+		#get archive - select the first esmond archive we find
+		my $ma_url;
+		foreach my $archive_raw(@{$tg->expanded_archives()}){
+			my $archive = new perfSONAR_PS::Client::PSConfig::Archive(data => $archive_raw );
+			next unless($archive->archiver() eq 'esmond');
+			next unless($archive->archiver_data());
+			next unless($archive->archiver_data()->{'url'});
+			$ma_url = $archive->archiver_data()->{'url'};
+			last;
+		}
+		unless($ma_url){
+			warn "No valid archives found for $task_name, skipping";
+			next;
+		}
+		
+		#get data from esmond for each hour configured
+		for (my $i = 0; $i < $hours; $i++){
+			# get forward and reverse
+			my $to_tsds_forward = get_data(from       => $pair[0]->address(),
+						       to         => $pair[1]->address(),
+						       ma_url     => $ma_url,
+						       hours_back => $i,
+						       interval   => $interval,
+						       test_type  => $test_type);
 
+			my $to_tsds_reverse = get_data(from       => $pair[1]->address(),
+						       to         => $pair[0]->address(),
+						       ma_url     => $ma_url,
+						       hours_back => $i,
+						       interval   => $interval,
+						       test_type  => $test_type);
+
+			# Send data collected for this source/dest pairing over
+			# into TSDS
+			#
+			my @combined = (@$to_tsds_forward, @$to_tsds_reverse);
+			my $merged = merge_owamp_results(\@combined);
+			send_to_tsds($merged)
+		}
+	}
+}
 
 #
-# Step 2a - for each test in the mesh, grab the data in Esmond so that
+# Step 3 - for each test in the config file, grab the data in Esmond so that
 # we can reformat and send to TSDS
 #
-foreach my $test (@$tests){
-
-    # This is very netsage specific
-    if ($test->{'members'}{'type'} ne 'disjoint'){
-	warn "Skipping netsage test because it's not a disjoint mesh";
-	next;
-    }
-
-    my $a_members = $test->{'members'}{'a_members'};
-    my $b_members = $test->{'members'}{'b_members'};
-
-    my $interval;
-    my $test_type = $test->{'parameters'}{'type'};
-
-    if ($test_type =~ /bwctl/){
-	$interval = $test->{'parameters'}{'interval'};
-    }
-    elsif ($test_type =~ /owamp/){
-	$interval = $test->{'parameters'}{'sample_count'} * $test->{'parameters'}{'packet_interval'};
-    }
-    else {
-	warn "Skipping unsupported test type: $test_type";
-	next;
-    }
-
-    # Each a member tests to/from each b member
-    foreach my $a_member (@$a_members){
-
-	foreach my $b_member (@$b_members){
-
-	    my $ma_url;
-	    # find the MA URL. Because they're all disjoint meshes
-	    # we can always use host A's MA
-	    foreach my $host (@hosts){
-		if (grep { $_ eq $a_member } @{$host->{'addresses'}}){
-		    $ma_url = $host->{'measurement_archives'}[0]->{'read_url'};
-		}
-	    }
-
-	    for (my $i = 0; $i < $hours; $i++){
-		
-		# get forward and reverse
-		my $to_tsds_forward = get_data(from       => $a_member,
-					       to         => $b_member,
-					       ma_url     => $ma_url,
-					       hours_back => $i,
-					       interval   => $interval,
-					       test_type  => $test_type);
-
-		my $to_tsds_reverse = get_data(from       => $b_member,
-					       to         => $a_member,
-					       ma_url     => $ma_url,
-					       hours_back => $i,
-					       interval   => $interval,
-					       test_type  => $test_type);
-		
-		#
-		# Step 3a
-		# Send data collected for this source/dest pairing over
-		# into TSDS
-		#
-		my @combined  = (@$to_tsds_forward, @$to_tsds_reverse);
-		my $merged    = merge_owamp_results(\@combined);
-
-		send_to_tsds($merged);
-
-	    }
-	}
-    }
-}
-
-
 $config->{'force_array'} = 1;
 my $config_tests = $config->get('/config/tests');
-
-#
-# Step 2b - for each test in the config file, grab the data in Esmond so that
-# we can reformat and send to TSDS
-#
-
 foreach my $conf (@$config_tests){
 
     my $tests = $conf->{'test'};
@@ -173,9 +178,9 @@ foreach my $conf (@$config_tests){
        my $test_type = $test->{'type'};
        my $interval;
 
-       if ($test_type =~ /bwctl/){
+       if ($test_type eq 'throughput' || $test_type eq 'disk-to-disk'){
            $interval = $test->{'interval'};
-       } elsif ($test_type =~ /owamp/){
+       } elsif ($test_type =~ 'latencybg'){
            $interval = $test->{'sample_count'} * $test->{'packet_interval'};
        }
 
@@ -199,7 +204,6 @@ foreach my $conf (@$config_tests){
                                               test_type		=> $test_type);
 
               #
-              # Step 3b
               # Send data collected for this source/dest pairing over
               # into TSDS
               #
@@ -217,7 +221,6 @@ write_service_status(  path => STATUS_FILE,
 		       error => 0,
 		       error_txt => "",
 		       timestamp => $NOW );
-
 
 sub get_data {
     my %args = @_;
@@ -239,122 +242,131 @@ sub get_data {
     print "Getting from $a -> $b from $url ($start -> $end)\n";
 
     my @event_types;
-    if ($test_type =~ /bwctl/){
-	push(@event_types, 'throughput');
-    }
-    if ($test_type =~ /owamp/){
-	push(@event_types, 'packet-loss-rate');
-	push(@event_types, 'histogram-owdelay');
+    if ($test_type eq 'throughput'){
+		push(@event_types, 'throughput');
+    } elsif ($test_type eq 'disk-to-disk'){
+		push(@event_types, 'pscheduler-raw');
+    } elsif ($test_type eq 'latencybg'){
+		push(@event_types, 'packet-loss-rate');
+		push(@event_types, 'histogram-owdelay');
     }
 
     foreach my $event_type (@event_types){
+		my $filters = new perfSONAR_PS::Client::Esmond::ApiFilters();
+		$filters->source($a);
+		$filters->destination($b);
+		$filters->event_type($event_type);
+		$filters->metadata_filters->{'pscheduler-test-type'} = $test_type;
+		$filters->time_start($start); #only get metadata modified since start
 
-	my $filters = new perfSONAR_PS::Client::Esmond::ApiFilters();
-	$filters->source($a);
-	$filters->destination($b);
-	$filters->event_type($event_type);
-
-	my $client = new perfSONAR_PS::Client::Esmond::ApiConnect(
-	    url => $url,
-	    filters => $filters
-	    );
-	
-	my $metadata_results = $client->get_metadata();
-
-	# check for errors
-	if ($client->error){
-	    warn "Error contacting $url";
-	    next;
-	} 
-	
-	foreach my $metadatum (@$metadata_results){
-
-	    # get data of a particular event type
-	    my $et = $metadatum->get_event_type($event_type);
-
-	    if (! $et){
-		warn "no event type? shouldn't be possible";
-		next;
-	    }
-
-	    $et->filters->time_start($start);
-	    $et->filters->time_end($end);
-
-	    my $data = $et->get_data();
-	
-	    _error($et->error) if ($et->error); #check for errors
-	
-	    # Go through and push data into TSDS format
-	    foreach my $d (@$data){
-
-		my $meta = {
-		    "source"      => $a,
-		    "destination" => $b
-		};
-
-		if ($event_type eq 'packet-loss-rate'){
-		    push(@to_tsds, {
-			"meta"     => $meta,
-		     	"interval" => $interval,
-		     	"type"     => TSDS_TYPE_OWAMP,
-		     	"time"     => $d->ts,
-		     	"values"   => {
-		     	    "loss" => $d->val
-		     	}
-			 });
-		}
-
-		if ($event_type eq 'throughput'){
-		    push(@to_tsds, {
-			"meta"     => $meta,
-			"interval" => $interval,
-			"type"     => TSDS_TYPE_BWCTL,
-			"time"     => $d->ts,
-			"values"   => {
-			    "throughput" => $d->val
-			}
-			 });
-		}
-
-		if ($event_type eq 'histogram-owdelay'){
-		    my $min;
-		    my $max;
-		    my $sum;
-		    my $count_total;
-		    
-		    foreach my $delay (keys %{$d->val}){
-			my $count_delay = $d->val->{$delay};
-			$count_total += $count_delay;
-			$sum         += $delay * $count_delay;
-
-			if (! defined $min || $delay < $min){
-			    $min = $delay;
-			}
-			if (! defined $max || $delay > $max){
-			    $max = $delay;
-			}
+		
+		my $client = new perfSONAR_PS::Client::Esmond::ApiConnect(
+		    url => $url,
+		    filters => $filters
+		    );
+		my $metadata_results = $client->get_metadata();
+		# check for errors
+		if ($client->error){
+		    warn "Error contacting $url";
+		    next;
+		} 
+		foreach my $metadatum (@$metadata_results){
+		    # get data of a particular event type
+		    my $et = $metadatum->get_event_type($event_type);
+		    if (! $et){
+				warn "no event type? shouldn't be possible";
+				next;
 		    }
+		    $et->filters->time_start($start);
+		    $et->filters->time_end($end);
 
-		    my $avg = undef;
-		    if ($count_total > 0){
-			$avg = $sum / $count_total;
-		    }
+		    my $data = $et->get_data();
+		    _error($et->error) if ($et->error); #check for errors
 
-		    push(@to_tsds, {
-			"meta"     => $meta,
-			"interval" => $interval,
-			"type"     => TSDS_TYPE_OWAMP,
-			"time"     => $d->ts,
-			"values"   => {
-			    "latency_min" => $min,
-			    "latency_max" => $max,
-			    "latency_avg" => $avg
+		    # Go through and push data into TSDS format
+		    foreach my $d (@$data){
+
+			my $meta = {
+			    "source"      => $a,
+			    "destination" => $b
+			};
+
+			if ($event_type eq 'packet-loss-rate'){
+			    push(@to_tsds, {
+				"meta"     => $meta,
+			     	"interval" => $interval,
+			     	"type"     => TSDS_TYPE_OWAMP,
+			     	"time"     => $d->ts,
+			     	"values"   => {
+			     	    "loss" => $d->val
+			     	}
+				 });
 			}
-			 });
-		}
 
-	    }
-	}
+			if ($event_type eq 'throughput'){
+			    push(@to_tsds, {
+				"meta"     => $meta,
+				"interval" => $interval,
+				"type"     => TSDS_TYPE_BWCTL,
+				"time"     => $d->ts,
+				"values"   => {
+				    "throughput" => $d->val
+				}
+				 });
+			}
+			
+			if ($event_type eq 'pscheduler-raw'){
+			    push(@to_tsds, {
+					"meta"     => $meta,
+					"interval" => $interval,
+					"type"     => TSDS_TYPE_DISKTODISK,
+					"time"     => $d->ts,
+					"values"   => {
+					    "disk_to_disk_throughput" => int($d->val->{'throughput'}),
+					    "disk_to_disk_bytes_sent" => int($d->val->{'bytes-sent'})
+					}
+				 });
+			}
+
+			if ($event_type eq 'histogram-owdelay'){
+			    my $min;
+			    my $max;
+			    my $sum;
+			    my $count_total;
+			    
+			    foreach my $delay (keys %{$d->val}){
+				my $count_delay = $d->val->{$delay};
+				$count_total += $count_delay;
+				$sum         += $delay * $count_delay;
+
+				if (! defined $min || $delay < $min){
+				    $min = $delay;
+				}
+				if (! defined $max || $delay > $max){
+				    $max = $delay;
+				}
+			    }
+
+			    my $avg = undef;
+			    if ($count_total > 0){
+				$avg = $sum / $count_total;
+			    }
+
+			    push(@to_tsds, {
+				"meta"     => $meta,
+				"interval" => $interval,
+				"type"     => TSDS_TYPE_OWAMP,
+				"time"     => $d->ts,
+				"values"   => {
+				    "latency_min" => $min,
+				    "latency_max" => $max,
+				    "latency_avg" => $avg
+				}
+				 });
+			}
+
+		    }
+		}
     }
 
     return \@to_tsds;
@@ -407,13 +419,13 @@ sub send_to_tsds {
     if ($block_size > scalar @$data){
 	$block_size = scalar @$data;
     }
-
+	
     my $it = natatime($block_size, @$data);
-
+	
     while (my @block = $it->()){
-
+	
 	my $res = $client->add_data(data => encode_json(\@block));
-
+	
 	if (! $res){
 	    _error("Error: " . $client->get_error());
 	}	
@@ -423,7 +435,7 @@ sub send_to_tsds {
 	if ($res->{'error'}){
 	    _error("WS Error: " . Dumper($res));
 	}
-
+	
     }
 }
 
