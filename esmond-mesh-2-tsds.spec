@@ -59,7 +59,7 @@ rm -rf $RPM_BUILD_ROOT
 %dir /var/lib/netsage/esmond-mesh-2-tsds/
 
 %pre
-/usr/bin/getent passwd netsage || /usr/sbin/useradd -r -g netsage -s /sbin/nologin netsage
+/usr/bin/getent passwd netsage || /usr/sbin/useradd -r -s /sbin/nologin netsage
 
 %changelog
 * Tue Aug 9 2016 Dan Doyle <daldoyle@netsage-archive.grnoc.iu.edu> - esmond-mesh-2-tsds
