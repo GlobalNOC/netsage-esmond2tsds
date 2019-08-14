@@ -1,7 +1,7 @@
 Summary: Esmond Mesh to TSDS Importer
 Name: esmond-mesh-2-tsds
 Version: 1.1.0
-Release: 1%{?dist}
+Release: 2%{?dist}
 License: Apache
 URL: https://sites.google.com/site/netsagensf/home#NetSage
 Source0: %{name}-%{version}.tar.gz
