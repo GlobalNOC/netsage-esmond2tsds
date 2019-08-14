@@ -13,6 +13,8 @@ Requires: perl-GRNOC-WebService-Client
 Requires: perl-JSON-XS
 Requires: perl-List-MoreUtils
 Requires: perl-DateTime
+Requires: libperfsonar-esmond-perl
+Requires: libperfsonar-psconfig-perl
 
 %description
 A script that takes a URL to a pS mesh json file, parses out the hosts
