@@ -1,3 +1,7 @@
+## Netsage esmond2tsds v1.2.0 - Wed Mar 17 2021
+
+* added perl WebServiceClient realm support for SAML/ECP
+
 ## Netsage esmond2tsds v1.1.0 - Wed Aug 14 2019
 
 * Updates to work with newer perfSONAR libraries and EL7.
