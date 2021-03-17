@@ -35,7 +35,7 @@ my $hours       = 1;
 
 my $NOW = time();
 
-GetOptions("configc|c=s" => \$config_file,   
+GetOptions("configc|c=s" => \$config_file,
 	   "back|b=s"    => \$hours);
 
 my $config = GRNOC::Config->new(config_file => $config_file, force_array => 0);
@@ -43,12 +43,14 @@ my $config = GRNOC::Config->new(config_file => $config_file, force_array => 0);
 my $username = $config->get('/config/tsds/@user');
 my $password = $config->get('/config/tsds/@password');
 my $tsds_url = $config->get('/config/tsds/@url');
+my $tsds_realm = $config->get('/config/tsds/@realm');
 my $mesh_url = $config->get('/config/mesh/@url');
 
 my $client = GRNOC::WebService::Client->new(usePost => 1,
 					    uid     => $username,
 					    passwd  => $password,
-					    url     => $tsds_url);
+					    url     => $tsds_url,
+						realm   => $tsds_realm);
 
 #
 # Step 1 - Build pSConfig client and validate downloaded JSON
@@ -73,7 +75,7 @@ if(@validate_errors){
 }
 
 #
-# Step 2 - Iterate through each task in pSConfig template and 
+# Step 2 - Iterate through each task in pSConfig template and
 # get source, dest, interval and MA URL for supported tests
 #
 foreach my $task_name(@{$psconfig->task_names()}){
@@ -88,7 +90,7 @@ foreach my $task_name(@{$psconfig->task_names()}){
          print "Error initializing task iterator: " . $tg->error();
          exit 1;
     }
-	
+
 	#check interval based on test type
 	my $test_type = $tg->test()->type();
 	my $test_spec = $tg->test()->spec();
@@ -115,7 +117,7 @@ foreach my $task_name(@{$psconfig->task_names()}){
 		warn "Task $task_name is unsupported type $test_type, skipping";
 		next;
 	}
-	
+
 	#iterate through endpoint pairs
 	my @pair;
     while(@pair = $tg->next()){
@@ -133,7 +135,7 @@ foreach my $task_name(@{$psconfig->task_names()}){
 			warn "No valid archives found for $task_name, skipping";
 			next;
 		}
-		
+
 		#get data from esmond for each hour configured
 		for (my $i = 0; $i < $hours; $i++){
 			# get forward and reverse
@@ -259,7 +261,7 @@ sub get_data {
 		$filters->metadata_filters->{'pscheduler-test-type'} = $test_type;
 		$filters->time_start($start); #only get metadata modified since start
 
-		
+
 		my $client = new perfSONAR_PS::Client::Esmond::ApiConnect(
 		    url => $url,
 		    filters => $filters
@@ -269,7 +271,7 @@ sub get_data {
 		if ($client->error){
 		    warn "Error contacting $url";
 		    next;
-		} 
+		}
 		foreach my $metadatum (@$metadata_results){
 		    # get data of a particular event type
 		    my $et = $metadatum->get_event_type($event_type);
@@ -314,7 +316,7 @@ sub get_data {
 				}
 				 });
 			}
-			
+
 			if ($event_type eq 'pscheduler-raw'){
 			    push(@to_tsds, {
 					"meta"     => $meta,
@@ -333,7 +335,7 @@ sub get_data {
 			    my $max;
 			    my $sum;
 			    my $count_total;
-			    
+
 			    foreach my $delay (keys %{$d->val}){
 				my $count_delay = $d->val->{$delay};
 				$count_total += $count_delay;
@@ -385,7 +387,7 @@ sub merge_owamp_results {
 	    push(@merged, $el);
 	    next;
 	}
-	
+
 	my $src = $el->{'meta'}{'source'};
 	my $dest = $el->{'meta'}{'destination'};
 
@@ -419,23 +421,23 @@ sub send_to_tsds {
     if ($block_size > scalar @$data){
 	$block_size = scalar @$data;
     }
-	
+
     my $it = natatime($block_size, @$data);
-	
+
     while (my @block = $it->()){
-	
+
 	my $res = $client->add_data(data => encode_json(\@block));
-	
+
 	if (! $res){
 	    _error("Error: " . $client->get_error());
-	}	
+	}
 	if (ref($res) ne 'HASH'){
 	    _error("Error: did not get hash response back, was " . Dumper($res));
 	}
 	if ($res->{'error'}){
 	    _error("WS Error: " . Dumper($res));
 	}
-	
+
     }
 }
 
@@ -445,7 +447,7 @@ sub _error {
     write_service_status(  path => STATUS_FILE,
 			   error => 1,
 			   error_txt => $text,
-			   timestamp => $NOW  );    
+			   timestamp => $NOW  );
 
     die $text;
 }

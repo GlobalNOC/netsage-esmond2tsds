@@ -1,5 +1,5 @@
 <config>
-   <tsds user="foo" password="bar" url="http://yourdomain.com/tsds/services/push.cgi" />
+   <tsds user="foo" password="bar" url="http://yourdomain.com/tsds/services/push.cgi" realm="" />
    <mesh url="http://yourdomain.com/meshes/yourmesh.json" />
    <tests ma_url="http://domain/esmond/perfsonar/archive/">
      <test type="test_type" interval="21600">
